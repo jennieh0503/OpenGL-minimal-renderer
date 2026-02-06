@@ -1,11 +1,13 @@
-#include<iostream>
-#include<GLAD/glad.h>
-#include<GLFW/glfw3.h>
+#include <iostream>
+#include <GLAD/glad.h>
+#include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include"shaderClass.h"
-#define ACCELERATION 1.0f
+#include "shaderClass.h"
+
+#define NUM_POINTS_IN_CIRCLE 32
+#define RESTITUTION 0.8f  //adding damping and energy loss in collisions for realism
 
 typedef struct mesh{
 	unsigned int VBO;
@@ -13,10 +15,22 @@ typedef struct mesh{
 	unsigned int shaderProg;
 } Mesh;
 
+typedef struct particle {
+	glm::vec3 position;
+	glm::vec3 velocity;
+	glm::vec3 force;
+
+	float radius;
+	float mass;
+};
+
 GLFWwindow* initialize();
-void drawShape(GLFWwindow* window, Mesh m);
+void draw(GLFWwindow* window, Mesh m, std::vector<particle> particles);
 Mesh initializeShape();
-void update(float* offset, float* velocity, float deltaTime);
+void updateParticle(particle& p, glm::vec3 gravity, float deltaTime);
+bool checkCollision(particle& p1, particle& p2);
+void resolveCollision(particle& p1, particle& p2);
+void updatePositions(particle& p1, particle& p2);
 
 
 
@@ -44,34 +58,39 @@ int main() {
 
 	//initializing shape with buffers and shaders, sending data to gpu to avoid repeated work conuming time
 	Mesh m = initializeShape();
-	//initializing offset and velocity for the shape movement/update logic
-	float offset[] = { 0.0f, 0.0f, 0.0f };
-	float velocity[] = { 0.0f, 1.0f, 0.0f };
+
+	//initializing particles, manual for small number test
+	std::vector<particle> particles;
+	particles.push_back({ glm::vec3(-0.2f, 0.6f, 0.0f), glm::vec3(0.3f, 0.0f, 0.0f), glm::vec3(0.0f), 0.1f, 1.0f });
+	particles.push_back({ glm::vec3(0.2f, 0.8f, 0.0f), glm::vec3(-0.3f, 0.0f, 0.0f), glm::vec3(0.0f), 0.1f, 1.0f });
+	
+	//defining gravity and initializing time
+	const glm::vec3 gravity(0.0f, -9.81f, 0.0f);
 	float time = glfwGetTime();
 	
 	//let window run until closure, added logic for a "bouncy" shape
 	while (!glfwWindowShouldClose(window)) {
 
-		//update the position during runtime
+		//update delta time (no longer frame dependent)
 		float newTime = glfwGetTime();
 		float deltaTime = newTime - time;
 		time = newTime;
-		update(offset, velocity, deltaTime);
 
-		//create transformation matrix
-		float transform[4][4] = {
-			{1.0f, 0.0f, 0.0f, offset[0]},
-			{0.0f, 1.0f, 0.0f, offset[1]},
-			{0.0f, 0.0f, 1.0f, offset[2]},
-			{0.0f, 0.0f, 0.0f, 1.0f}
-		};
+		//update each particle by applying gravity (also checking for boundaries)
+		for (particle& p : particles) {
+			updateParticle(p, gravity, deltaTime);
+		}
 
-		//pass transformation matrix to vertex shader
-		unsigned int transformationLoc = glGetUniformLocation(m.shaderProg, "transformation");
-		glUseProgram(m.shaderProg);
-		glUniformMatrix4fv(transformationLoc, 1, GL_TRUE, &transform[0][0]);
+		//update with collisions
+		for (particle& p1 : particles) {
+			for (particle& p2 : particles) {
+				if (checkCollision(p1, p2)) {
+					resolveCollision(p1, p2);
+				}
+			}
+		}
 
-		drawShape(window, m);
+		draw(window, m, particles);
 
 		glfwPollEvents();
 	}
@@ -87,6 +106,7 @@ int main() {
 }
 
 
+//initializing glfw, window
 GLFWwindow* initialize() {
 	//initialize glfw
 	glfwInit();
@@ -104,20 +124,25 @@ GLFWwindow* initialize() {
 	return window;
 }
 
+
+//shape initialization function, creates the shape by sending data to the gpu and creating shader
+//updated to create circles (particles simplification for collision simulation)
+//updated by using glm for vector operations
 Mesh initializeShape() {
 	Mesh m;
 
-	//create vertices array, the array contains coordinates in normalized form
-	//z axis kept to a constant to represent a flat 2d object
-	float vertices[] = {
-		-0.5f, -1.0f, 0.0f,
-		0.5f, -1.0f, 0.0f,
-		-0.5f, 0.0f, 0.0f,
-		0.5f, -1.0f, 0.0f,
-		0.5f, 0.0f, 0.0f,
-		-0.5f, 0.0f, 0.0f
-	};
+	float angle = 360.0f / NUM_POINTS_IN_CIRCLE;
 
+	//create vertices vector
+	//z axis kept to a constant to represent a flat 2d object
+	std::vector<glm::vec3> vertices;
+	vertices.push_back(glm::vec3(0.0f, 0.0f, 0.0f)); //center point
+	for (int i = 0; i <= NUM_POINTS_IN_CIRCLE;  i++) {
+		float currentAngle = angle * i;
+		float x = 1.0f * cos(glm::radians(currentAngle));
+		float y = 1.0f * sin(glm::radians(currentAngle));
+		vertices.push_back(glm::vec3(x, y, 0.0f));  //2d, constant z
+	}
 
 	//creating shaders using the shader class
 	Shader sProg("vert.txt", "frag.txt");
@@ -131,51 +156,121 @@ Mesh initializeShape() {
 	glGenBuffers(1, &m.VBO);
 	glBindVertexArray(m.VAO);
 	glBindBuffer(GL_ARRAY_BUFFER, m.VBO);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+	glBufferData(GL_ARRAY_BUFFER, vertices.size()*sizeof(glm::vec3), vertices.data(), GL_STATIC_DRAW);
 
-	return m;
-}
-
-
-
-//added offset to make the shape move, offset not checked, it could end out the visible window
-void drawShape(GLFWwindow* window, Mesh m) {
 	//configuration of VAO to interpret the data sent to the buffer.
 	//the vertices were saved as sets of coordinates, all in one single array, therefore each 3 belond to a vertex
 	//(starting from element 0 of the array vertices)
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 	glEnableVertexAttribArray(0);
 
-	//draw shape
-	//changed int0 a rectangle, obtained as two triangles so the number of vertices became 6
-	glClearColor(0.924, 0.929, 0.920, 1);
+	return m;
+}
+
+
+
+//drawing function
+void draw(GLFWwindow* window, Mesh m, std::vector<particle> particles) {
+
+	glClearColor(0.0891, 0.0873, 0.0900, 1);
 	glClear(GL_COLOR_BUFFER_BIT);
-	glUseProgram(m.shaderProg);
-	glBindVertexArray(m.VAO);
-	glDrawArrays(GL_TRIANGLES, 0, 6);
+
+	unsigned int transformationLoc = glGetUniformLocation(m.shaderProg, "transformation"); //get location of transformation matrix in shader
+
+	//update transformation matrix for each particle
+	//because the standard shape has a radius of 1 scaling is done to get the particle's actual size
+	//translation allows to showcase motion (without having to modify the actual vertex data)
+	for (particle p : particles) {
+		glm::mat4 transform = glm::mat4(1.0f);
+		transform = glm::translate(transform, p.position);
+		transform = glm::scale(transform, glm::vec3(p.radius, p.radius, 1.0f));
+
+		//pass transformation matrix to vertex shader
+		glUseProgram(m.shaderProg);
+		glUniformMatrix4fv(transformationLoc, 1, GL_FALSE, &transform[0][0]);
+
+		//draw the particle
+		glUseProgram(m.shaderProg);
+		glBindVertexArray(m.VAO);
+		glDrawArrays(GL_TRIANGLE_FAN, 0, NUM_POINTS_IN_CIRCLE+2);
+	}
+	
 	glfwSwapBuffers(window);
 }
 
 //update logic
-void update(float* offset, float* velocity, float deltaTime) {
-	//update the offset to achieve movement
-	offset[1] += velocity[1]*deltaTime;
+//modified to simulate actual gravity and collision, not just uniformly accelerated motion
+void updateParticle(particle& p, glm::vec3 gravity, float deltaTime) {
+	p.force = gravity * p.mass;
+	p.velocity += gravity * deltaTime;
+	p.position += p.velocity * deltaTime;
 
-	//boundaries check, invert velocity when hitting a boundary
-	if (offset[1] > 1.0f || offset[1] < 0.0f) {
-		velocity[1] = -velocity[1];
+	//boundaries
+	if (p.position.x < -1.0f + p.radius) {
+		p.position.x = -1.0f + p.radius;
+		p.velocity.x *= -RESTITUTION;
+	}
+	else if (p.position.x > 1.0f - p.radius) {
+		p.position.x = 1.0f - p.radius;
+		p.velocity.x *= -RESTITUTION;
 	}
 
-	//velocity clamping
-	if (velocity[1] > 1.0f) {
-		velocity[1] = 1.0f;
+	if (p.position.y < -1.0f + p.radius) {
+		p.position.y = -1.0f + p.radius;
+		p.velocity.y *= -RESTITUTION;
 	}
-	else if (velocity[1] < -1.0f) {
-		velocity[1] = -1.0f;
+	else if (p.position.y > 1.0f - p.radius) {
+		p.position.y = 1.0f - p.radius;
+		p.velocity.y *= -RESTITUTION;
+	}
+}
+
+bool checkCollision(particle& p1, particle& p2) {
+	float distance = glm::length(p1.position - p2.position);
+	return distance < (p1.radius + p2.radius);
+}
+
+void resolveCollision(particle& p1, particle& p2) {
+	//calculate normal vector, direction from p1 to p2, normalized to get only the direction without magnitude
+	//represents the direction of the impulse
+	glm::vec3 n = p2.position - p1.position;
+	float distance = glm::length(n);
+	if (distance == 0.0f) {
+		return;
+	}
+	n = n / distance;
+
+	//calculate relative velocity to see if the collision has already been solved and the particles are already going different ways
+	glm::vec3 relativeVelocity = p2.velocity - p1.velocity;
+	if (glm::dot(relativeVelocity, n) > 0) {  //checking the component on the normal, if it's positive they are moving apart
+		return;
 	}
 
-	//velocity logic, slows down over time going up until it becomes slow enough to start going down, accelerates going down
-	//could be further developed with actual gravity and friction
-	velocity[1] -= ACCELERATION * deltaTime;
+	//calculate impulse using the formula for elastic collisions, modified by restitution to add damping
+	float impulseMagnitude = -(1.0f + RESTITUTION) * glm::dot(relativeVelocity, n) / (1.0f / p1.mass + 1.0f / p2.mass);
 
+	//apply impulse
+	glm::vec3 impulse = impulseMagnitude * n;
+	p1.velocity -= impulse / p1.mass;
+	p2.velocity += impulse / p2.mass;
+
+	updatePositions(p1, p2);
+
+}
+
+void updatePositions(particle& p1, particle& p2) {
+	float percentage = 0.8f;  //percentage to move each particle, gradual corrections allow better stability and prevent jittering
+	float slop = 0.01f;  //small value to prevent sinking due to numerical errors
+	
+	float distance = glm::length(p2.position - p1.position);
+	if (distance == 0.0f) {
+		return;
+	}
+
+	float penetration = (p1.radius + p2.radius) - distance;
+	if (penetration > slop) {
+		glm::vec3 correction = (penetration / (1.0f / p1.mass + 1.0f / p2.mass)) * ((p2.position - p1.position) / distance) * percentage;
+		p1.position -= correction / p1.mass;
+		p2.position += correction / p2.mass;
+	}
 }
