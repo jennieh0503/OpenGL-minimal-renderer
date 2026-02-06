@@ -24,6 +24,8 @@ Project to learn how particle simulation works. Evolution of a minimal renderer 
 - separation of initialization and update logic, optimization: introduced glm and transformation matrix to update the position without changing the vertices and avoiding unnecessary data flow from CPU to GPU.
 - introducing particles, gravity, and collision: defining a new structure to represent a particle, changed the motion to a force based one and introduced the concept of mass. Added collision logic.
 
+- added a variant of the project with random generation of multiple particles.
+
 ---
 
 ## DECISIONAL CHOICES
